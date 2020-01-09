@@ -1,0 +1,32 @@
+diff -r 4fcc03bd6308 env/env_region.c
+--- a/env/env_region.c	Thu May 15 21:13:25 2008 +0000
++++ b/env/env_region.c	Mon May 04 16:00:34 2015 -0700
+@@ -335,17 +335,22 @@
+ 	 * arrays and the thread control block table are all stored in the
+ 	 * base environment region.  This is a bug, at the least replication
+ 	 * should have its own region.
+-	 *
+-	 * Allocate space for thread info blocks.  Max is only advisory,
+-	 * so we allocate 25% more.
+ 	 */
+ 	memset(&tregion, 0, sizeof(tregion));
+ 	nregions = __memp_max_regions(env) + 10;
+ 	size = nregions * sizeof(REGION);
+ 	size += dbenv->passwd_len;
+-	size += (dbenv->thr_max + dbenv->thr_max / 4) *
+-	    __env_alloc_size(sizeof(DB_THREAD_INFO));
+-	size += env->thr_nbucket * __env_alloc_size(sizeof(DB_HASHTAB));
++	if (dbenv->thr_max != 0) {
++		/*
++		 * Allow space for thread info blocks and their hash table.
++		 * Include enough for each bucket to have its own set of
++		 * DB_THREAD_INFO structs, which permits mutex-free searches.
++		 */
++		env->thr_nbucket = __db_tablesize(dbenv->thr_max / 8);
++		size += env->thr_nbucket * dbenv->thr_max *
++		    __env_alloc_size(sizeof(DB_THREAD_INFO));
++		size += __env_alloc_size(env->thr_nbucket * sizeof(DB_HASHTAB));
++	}
+ 	size += 16 * 1024;
+ 	tregion.size = size;
+ 	tregion.segid = INVALID_REGION_SEGID;
