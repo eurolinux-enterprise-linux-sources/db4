@@ -1,0 +1,12 @@
+diff -up db-4.7.25/env/env_file.c.wrt_segfault db-4.7.25/env/env_file.c
+--- db-4.7.25/env/env_file.c.wrt_segfault	2016-09-12 12:19:00.288344938 +0200
++++ db-4.7.25/env/env_file.c	2016-09-12 12:19:45.658250070 +0200
+@@ -49,7 +49,7 @@ __db_file_extend(env, fhp, size)
+ 
+ err:	__os_free(env, buf);
+ 
+-	return (0);
++	return (ret);
+ }
+ 
+ /*

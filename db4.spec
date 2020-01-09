@@ -5,7 +5,7 @@
 Summary: The Berkeley DB database library (version 4) for C
 Name: db4
 Version: 4.7.25
-Release: 20%{?dist}.1
+Release: 22%{?dist}
 Source0: http://download.oracle.com/berkeley-db/db-%{version}.tar.gz
 Source1: http://download.oracle.com/berkeley-db/db.1.85.tar.gz
 # db-4.7.25 upstream patches
@@ -28,7 +28,8 @@ Patch25: db-4.7.25-bt_verify.patch
 Patch26: db-4.7.25-mutex-init.patch
 Patch27: db-4.7.25-memp_stat.patch
 Patch28: db-4.7.25-env_region-threads.patch
-Patch29: db-4.7.25-mutex_leak.patch
+Patch29: db-4.7.25-segfault_write.patch
+Patch30: db-4.7.25-mutex_leak.patch
 URL: http://www.oracle.com/database/berkeley-db/
 License: Sleepycat and BSD
 Group: System Environment/Libraries
@@ -152,7 +153,8 @@ popd
 %patch26 -p1 -b .mutex-init-fix
 %patch27 -p1 -b .memp_stat
 %patch28 -p1 -b .env_region
-%patch29 -p1 -b .mutex_leak
+%patch29 -p1 -b .wrt_segfault
+%patch30 -p1 -b .mutex_leak
 
 # Remove tags files which we don't need.
 find . -name tags | xargs rm -f
@@ -254,7 +256,7 @@ rm -rf ${RPM_BUILD_ROOT}
 mkdir -p ${RPM_BUILD_ROOT}%{_includedir}
 mkdir -p ${RPM_BUILD_ROOT}%{_libdir}
 
-%makeinstall -C dist/dist-tls
+%makeinstall STRIP=/bin/true -C dist/dist-tls
 
 # XXX Nuke non-versioned archives and symlinks
 rm -f ${RPM_BUILD_ROOT}%{_libdir}/{libdb.a,libdb_cxx.a}
@@ -387,8 +389,12 @@ rm -rf ${RPM_BUILD_ROOT}
 %endif
 
 %changelog
-* Wed Nov 16 2016 Petr Kubat <pkubat@redhat.com> 4.7.25-20.1
-- Fix mutexes not being released properly (#1395599)
+* Thu Nov 03 2016 Petr Kubat <pkubat@redhat.com> 4.7.25-22
+- Fix mutexes not being released properly (#1272680)
+
+* Mon Sep 12 2016 Petr Kubat <pkubat@redhat.com> 4.7.25-21
+- Fix missing debuginfo packages (#729002)
+- Fix segfault in libdb after write (#740631)
 
 * Fri Aug 14 2015 Jan Stanek <jstanek@redhat.com> 4.7.25-20
 - Apply upstream patch for multithreaded env_region issues
