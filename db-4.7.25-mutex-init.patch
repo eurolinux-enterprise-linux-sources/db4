@@ -1,0 +1,37 @@
+# Should fix possible db lock, which caused problems for rpm (#989348)
+
+diff -uNr db-4.7.25.orig/env/env_open.c db-4.7.25/env/env_open.c
+--- db-4.7.25.orig/env/env_open.c	2008-03-26 02:00:28.000000000 +1000
++++ db-4.7.25/env/env_open.c	2013-08-05 10:35:58.471827969 +1000
+@@ -339,15 +339,7 @@
+ 	 * Initialize thread tracking and enter the API.
+ 	 */
+ 	infop = env->reginfo;
+-	if ((ret =
+-	    __env_thread_init(env, F_ISSET(infop, REGION_CREATE) ? 1 : 0)) != 0)
+-		goto err;
+-
+-	ENV_ENTER(env, ip);
+ 
+-	/*
+-	 * Initialize the subsystems.
+-	 */
+ #ifdef HAVE_MUTEX_SUPPORT
+ 	/*
+ 	 * Initialize the mutex regions first.  There's no ordering requirement,
+@@ -358,6 +350,15 @@
+ 	if ((ret = __mutex_open(env, create_ok)) != 0)
+ 		goto err;
+ #endif
++	if ((ret =
++	    __env_thread_init(env, F_ISSET(infop, REGION_CREATE) ? 1 : 0)) != 0)
++		goto err;
++
++	ENV_ENTER(env, ip);
++
++	/*
++	 * Initialize the subsystems.
++	 */
+ 	/*
+ 	 * We can now acquire/create mutexes: increment the region's reference
+ 	 * count.
