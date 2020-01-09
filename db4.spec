@@ -5,7 +5,7 @@
 Summary: The Berkeley DB database library (version 4) for C
 Name: db4
 Version: 4.7.25
-Release: 18%{?dist}
+Release: 19%{?dist}
 Source0: http://download.oracle.com/berkeley-db/db-%{version}.tar.gz
 Source1: http://download.oracle.com/berkeley-db/db.1.85.tar.gz
 # db-4.7.25 upstream patches
@@ -26,6 +26,7 @@ Patch23: db-4.7.25-acmacro.patch
 Patch24: db-4.5.20-jni-include-dir.patch
 Patch25: db-4.7.25-bt_verify.patch
 Patch26: db-4.7.25-mutex-init.patch
+Patch27: db-4.7.25-memp_stat.patch
 URL: http://www.oracle.com/database/berkeley-db/
 License: Sleepycat and BSD
 Group: System Environment/Libraries
@@ -147,6 +148,7 @@ popd
 %patch24 -p1 -b .4.5.20.jni
 %patch25 -p0 -b .bt_verify
 %patch26 -p1 -b .mutex-init-fix
+%patch27 -p1 -b .memp_stat
 
 # Remove tags files which we don't need.
 find . -name tags | xargs rm -f
@@ -381,6 +383,10 @@ rm -rf ${RPM_BUILD_ROOT}
 %endif
 
 %changelog
+* Fri May 29 2015 Jan Stanek <jstanek@redhat.com> 4.7.25-19
+- Add upstream fix for memp_stat issues
+- Resolves: rhbz#1224316
+
 * Mon Sep 09 2013 Jan Stanek <jstanek@redhat.com> 4.7.25-18
 - sanity fix for db locking bug
 - Resolves: #989348
