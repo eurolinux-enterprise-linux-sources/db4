@@ -1,0 +1,809 @@
+diff -U 5 -rN db-4.7.25.old/dbinc/mutex.h db-4.7.25/dbinc/mutex.h
+--- db-4.7.25.old/dbinc/mutex.h	2008-01-09 04:58:18.000000000 +0800
++++ db-4.7.25/dbinc/mutex.h	2016-10-27 00:04:27.000000000 +0800
+@@ -13,6 +13,12 @@
+ extern "C" {
+ #endif
+ 
++#ifdef HAVE_MUTEX_SUPPORT
++        /* The inlined trylock calls need access to the details of mutexes. */
++#define LOAD_ACTUAL_MUTEX_CODE
++#include "dbinc/mutex_int.h"
++#endif
++
+ /*
+  * By default, spin 50 times per processor if fail to acquire a test-and-set
+  * mutex, we have anecdotal evidence it's a reasonable value.
+@@ -70,8 +76,42 @@
+     defined(HAVE_MUTEX_UI_THREADS))
+ #define	__mutex_init(a, b, c)		__db_pthread_mutex_init(a, b, c)
+ #define	__mutex_lock(a, b)		__db_pthread_mutex_lock(a, b)
++#define	__mutex_trylock(a, b)		__db_pthread_mutex_trylock(a, b)
+ #define	__mutex_unlock(a, b)		__db_pthread_mutex_unlock(a, b)
+ #define	__mutex_destroy(a, b)		__db_pthread_mutex_destroy(a, b)
++
++#define MUTEXP_SET_BACKPORT(env, indx)                       \
++    (F_ISSET(env, ENV_PRIVATE) ? (DB_MUTEX *) indx :        \
++    (DB_MUTEX *)((u_int8_t *)env->mutex_handle->mutex_array +   \
++        (indx) *                            \
++        ((DB_MUTEXREGION *)env->mutex_handle->reginfo.primary)->mutex_size))
++
++/*
++ * These trylock versions do not support DB_ENV_FAILCHK. Callers which loop
++ * checking mutexes which are held by dead processes or threads might spin.
++ * These have ANSI-style definitions because this file can be included by
++ * C++ files, and extern "C" affects linkage only, not argument typing.
++ */
++static inline int __db_pthread_mutex_trylock(ENV *env, db_mutex_t mutex)
++{
++	int ret;
++	DB_MUTEX *mutexp;
++	if (!MUTEX_ON(env) || F_ISSET(env->dbenv, DB_ENV_NOLOCKING))
++		return (0);
++	mutexp = MUTEXP_SET_BACKPORT(env, mutex);
++
++	ret = pthread_mutex_trylock(&mutexp->mutex);
++	if (ret == EBUSY)
++		ret = DB_LOCK_NOTGRANTED;
++	else if (ret == 0) {
++		F_SET(mutexp, DB_MUTEX_LOCKED);
++		env->dbenv->thread_id(env->dbenv, &mutexp->pid, &mutexp->tid);
++#if defined(HAVE_STATISTICS)
++		++mutexp->mutex_set_nowait;
++#endif
++	}
++	return (ret);
++}
+ #elif defined(HAVE_MUTEX_WIN32) || defined(HAVE_MUTEX_WIN32_GCC)
+ #define	__mutex_init(a, b, c)		__db_win32_mutex_init(a, b, c)
+ #define	__mutex_lock(a, b)		__db_win32_mutex_lock(a, b)
+@@ -83,10 +110,11 @@
+ #define	__mutex_unlock(a, b)		__db_fcntl_mutex_unlock(a, b)
+ #define	__mutex_destroy(a, b)		__db_fcntl_mutex_destroy(a, b)
+ #else
+ #define	__mutex_init(a, b, c)		__db_tas_mutex_init(a, b, c)
+ #define	__mutex_lock(a, b)		__db_tas_mutex_lock(a, b)
++#define	__mutex_trylock(a, b)		__db_tas_mutex_trylock(a, b)
+ #define	__mutex_unlock(a, b)		__db_tas_mutex_unlock(a, b)
+ #define	__mutex_destroy(a, b)		__db_tas_mutex_destroy(a, b)
+ #endif
+ 
+ /*
+@@ -106,10 +134,16 @@
+ #define	MUTEX_UNLOCK(dbenv, mutex) do {					\
+ 	if ((mutex) != MUTEX_INVALID &&					\
+ 	    __mutex_unlock(dbenv, mutex) != 0)				\
+ 		return (DB_RUNRECOVERY);				\
+ } while (0)
++#define	MUTEX_TRYLOCK(env, mutex, ret)	do {				\
++	if ((mutex) == MUTEX_INVALID)					\
++		ret = 0;						\
++	else 								\
++		ret = __mutex_trylock(env, mutex);			\
++} while (0)
+ #else
+ /*
+  * XXX
+  * There are calls to lock/unlock mutexes outside of #ifdef's -- replace
+  * the call with something the compiler can discard, but which will make
+@@ -117,10 +151,12 @@
+  */
+ #define	MUTEX_LOCK(dbenv, mutex)					\
+ 	(mutex) = (mutex);
+ #define	MUTEX_UNLOCK(dbenv, mutex)					\
+ 	(mutex) = (mutex);
++#define	MUTEX_TRYLOCK(env, mutex, ret) 					\
++	ret = 0;
+ #endif
+ 
+ /*
+  * Berkeley DB ports may require single-threading at places in the code.
+  */
+diff -U 5 -rN db-4.7.25.old/dbinc_auto/int_def.in db-4.7.25/dbinc_auto/int_def.in
+--- db-4.7.25.old/dbinc_auto/int_def.in	2008-05-10 01:05:59.000000000 +0800
++++ db-4.7.25/dbinc_auto/int_def.in	2016-10-27 00:01:10.000000000 +0800
+@@ -1041,10 +1041,11 @@
+ #define	__memp_fopen __memp_fopen@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_fclose_pp __memp_fclose_pp@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_fclose __memp_fclose@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_mf_discard __memp_mf_discard@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_inmemlist __memp_inmemlist@DB_VERSION_UNIQUE_NAME@
++#define	__memp_mf_mark_dead __memp_mf_mark_dead@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_fput_pp __memp_fput_pp@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_fput __memp_fput@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_unpin_buffers __memp_unpin_buffers@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_dirty __memp_dirty@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_env_create __memp_env_create@DB_VERSION_UNIQUE_NAME@
+@@ -1092,10 +1093,11 @@
+ #define	__memp_fsync_pp __memp_fsync_pp@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_fsync __memp_fsync@DB_VERSION_UNIQUE_NAME@
+ #define	__mp_xxx_fh __mp_xxx_fh@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_sync_int __memp_sync_int@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_mf_sync __memp_mf_sync@DB_VERSION_UNIQUE_NAME@
++#define	__memp_purge_dead_files __memp_purge_dead_files@DB_VERSION_UNIQUE_NAME@
+ #define	__memp_trickle_pp __memp_trickle_pp@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_alloc __mutex_alloc@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_alloc_int __mutex_alloc_int@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_free __mutex_free@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_free_int __mutex_free_int@DB_VERSION_UNIQUE_NAME@
+@@ -1130,10 +1132,11 @@
+ #define	__mutex_print_debug_stats __mutex_print_debug_stats@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_set_wait_info __mutex_set_wait_info@DB_VERSION_UNIQUE_NAME@
+ #define	__mutex_clear __mutex_clear@DB_VERSION_UNIQUE_NAME@
+ #define	__db_tas_mutex_init __db_tas_mutex_init@DB_VERSION_UNIQUE_NAME@
+ #define	__db_tas_mutex_lock __db_tas_mutex_lock@DB_VERSION_UNIQUE_NAME@
++#define	__db_tas_mutex_trylock __db_tas_mutex_trylock@DB_VERSION_UNIQUE_NAME@
+ #define	__db_tas_mutex_unlock __db_tas_mutex_unlock@DB_VERSION_UNIQUE_NAME@
+ #define	__db_tas_mutex_destroy __db_tas_mutex_destroy@DB_VERSION_UNIQUE_NAME@
+ #define	__db_win32_mutex_init __db_win32_mutex_init@DB_VERSION_UNIQUE_NAME@
+ #define	__db_win32_mutex_lock __db_win32_mutex_lock@DB_VERSION_UNIQUE_NAME@
+ #define	__db_win32_mutex_unlock __db_win32_mutex_unlock@DB_VERSION_UNIQUE_NAME@
+diff -U 5 -rN db-4.7.25.old/dbinc_auto/mp_ext.h db-4.7.25/dbinc_auto/mp_ext.h
+--- db-4.7.25.old/dbinc_auto/mp_ext.h	2008-05-06 01:47:01.000000000 +0800
++++ db-4.7.25/dbinc_auto/mp_ext.h	2016-10-25 22:45:39.000000000 +0800
+@@ -33,10 +33,11 @@
+ int __memp_fopen __P((DB_MPOOLFILE *, MPOOLFILE *, const char *, u_int32_t, int, size_t));
+ int __memp_fclose_pp __P((DB_MPOOLFILE *, u_int32_t));
+ int __memp_fclose __P((DB_MPOOLFILE *, u_int32_t));
+ int __memp_mf_discard __P((DB_MPOOL *, MPOOLFILE *));
+ int __memp_inmemlist __P((ENV *, char ***, int *));
++void __memp_mf_mark_dead __P((DB_MPOOL *, MPOOLFILE *, int*));
+ int __memp_fput_pp __P((DB_MPOOLFILE *, void *, DB_CACHE_PRIORITY, u_int32_t));
+ int __memp_fput __P((DB_MPOOLFILE *, DB_THREAD_INFO *, void *, DB_CACHE_PRIORITY));
+ int __memp_unpin_buffers __P((ENV *, DB_THREAD_INFO *));
+ int __memp_dirty __P((DB_MPOOLFILE *, void *, DB_THREAD_INFO *, DB_TXN *, DB_CACHE_PRIORITY, u_int32_t));
+ int __memp_env_create __P((DB_ENV *));
+@@ -84,10 +85,11 @@
+ int __memp_fsync_pp __P((DB_MPOOLFILE *));
+ int __memp_fsync __P((DB_MPOOLFILE *));
+ int __mp_xxx_fh __P((DB_MPOOLFILE *, DB_FH **));
+ int __memp_sync_int __P((ENV *, DB_MPOOLFILE *, u_int32_t, u_int32_t, u_int32_t *, int *));
+ int __memp_mf_sync __P((DB_MPOOL *, MPOOLFILE *, int));
++int __memp_purge_dead_files __P((ENV *));
+ int __memp_trickle_pp __P((DB_ENV *, int, int *));
+ 
+ #if defined(__cplusplus)
+ }
+ #endif
+diff -U 5 -rN db-4.7.25.old/dbinc_auto/mutex_ext.h db-4.7.25/dbinc_auto/mutex_ext.h
+--- db-4.7.25.old/dbinc_auto/mutex_ext.h	2007-11-18 22:15:40.000000000 +0800
++++ db-4.7.25/dbinc_auto/mutex_ext.h	2016-10-27 00:00:45.000000000 +0800
+@@ -41,10 +41,11 @@
+ void __mutex_print_debug_stats __P((ENV *, DB_MSGBUF *, db_mutex_t, u_int32_t));
+ void __mutex_set_wait_info __P((ENV *, db_mutex_t, u_int32_t *, u_int32_t *));
+ void __mutex_clear __P((ENV *, db_mutex_t));
+ int __db_tas_mutex_init __P((ENV *, db_mutex_t, u_int32_t));
+ int __db_tas_mutex_lock __P((ENV *, db_mutex_t));
++int __db_tas_mutex_trylock __P((ENV *, db_mutex_t));
+ int __db_tas_mutex_unlock __P((ENV *, db_mutex_t));
+ int __db_tas_mutex_destroy __P((ENV *, db_mutex_t));
+ int __db_win32_mutex_init __P((ENV *, db_mutex_t, u_int32_t));
+ int __db_win32_mutex_lock __P((ENV *, db_mutex_t));
+ int __db_win32_mutex_unlock __P((ENV *, db_mutex_t));
+diff -U 5 -rN db-4.7.25.old/mp/mp_fopen.c db-4.7.25/mp/mp_fopen.c
+--- db-4.7.25.old/mp/mp_fopen.c	2008-02-01 02:40:45.000000000 +0800
++++ db-4.7.25/mp/mp_fopen.c	2016-10-27 00:07:22.000000000 +0800
+@@ -12,10 +12,15 @@
+ #include "dbinc/log.h"
+ #include "dbinc/mp.h"
+ #include "dbinc/db_page.h"
+ #include "dbinc/hash.h"
+ 
++#ifdef HAVE_MUTEX_SUPPORT
++#include "dbinc/mutex_int.h"
++#endif
++
++static int __memp_count_dead_mutex __P((DB_MPOOL *, u_int32_t *));
+ static int __memp_mpf_alloc __P((DB_MPOOL *,
+     DB_MPOOLFILE *, const char *, u_int32_t, u_int32_t, MPOOLFILE **));
+ static int __memp_mpf_find __P((ENV *,
+     DB_MPOOLFILE *, DB_MPOOL_HASH *, const char *, u_int32_t, MPOOLFILE **));
+ 
+@@ -620,11 +625,15 @@
+ 		 * We should be able to set mfp to NULL and break out of the
+ 		 * loop, but I like the idea of checking all the entries.
+ 		 */
+ 		if (LF_ISSET(DB_TRUNCATE)) {
+ 			MUTEX_LOCK(env, mfp->mutex);
+-			mfp->deadfile = 1;
++			/*
++			 * We cannot purge dead files here, because the caller
++			 * is holding the mutex of the hash bucket of mfp.
++			 */
++			__memp_mf_mark_dead(dbmp, mfp, NULL);
+ 			MUTEX_UNLOCK(env, mfp->mutex);
+ 			continue;
+ 		}
+ 
+ 		/*
+@@ -803,14 +812,15 @@
+ 	DB_MPOOL *dbmp;
+ 	ENV *env;
+ 	MPOOLFILE *mfp;
+ 	char *rpath;
+ 	u_int32_t ref;
+-	int deleted, ret, t_ret;
++	int deleted, purge_dead, ret, t_ret;
+ 
+ 	env = dbmfp->env;
+ 	dbmp = env->mp_handle;
++	purge_dead = 0;
+ 	ret = 0;
+ 
+ 	/*
+ 	 * Remove the DB_MPOOLFILE from the process' list.
+ 	 *
+@@ -893,11 +903,11 @@
+ 	if (F_ISSET(dbmfp, MP_MULTIVERSION))
+ 		--mfp->multiversion;
+ 	if (--mfp->mpf_cnt == 0 || LF_ISSET(DB_MPOOL_DISCARD)) {
+ 		if (LF_ISSET(DB_MPOOL_DISCARD) ||
+ 		    F_ISSET(mfp, MP_TEMP) || mfp->unlink_on_close) {
+-			mfp->deadfile = 1;
++			__memp_mf_mark_dead(dbmp, mfp, &purge_dead);
+ 		}
+ 		if (mfp->unlink_on_close) {
+ 			if ((t_ret = __db_appname(dbmp->env,
+ 			    DB_APP_DATA, R_ADDR(dbmp->reginfo,
+ 			    mfp->path_off), 0, NULL, &rpath)) != 0 && ret == 0)
+@@ -922,10 +932,12 @@
+ 			deleted = 1;
+ 		}
+ 	}
+ 	if (!deleted && !LF_ISSET(DB_MPOOL_NOLOCK))
+ 		MUTEX_UNLOCK(env, mfp->mutex);
++	if (purge_dead)
++		(void)__memp_purge_dead_files(env);
+ 
+ done:	/* Discard the DB_MPOOLFILE structure. */
+ 	if (dbmfp->pgcookie != NULL) {
+ 		__os_free(env, dbmfp->pgcookie->data);
+ 		__os_free(env, dbmfp->pgcookie);
+@@ -975,11 +987,11 @@
+ 	/*
+ 	 * We have to release the MPOOLFILE mutex before acquiring the region
+ 	 * mutex so we don't deadlock.  Make sure nobody ever looks at this
+ 	 * structure again.
+ 	 */
+-	mfp->deadfile = 1;
++	__memp_mf_mark_dead(dbmp, mfp, NULL);
+ 
+ 	/* Discard the mutex we're holding and return it too the pool. */
+ 	MUTEX_UNLOCK(env, mfp->mutex);
+ 	if ((t_ret = __mutex_free(env, &mfp->mutex)) != 0 && ret == 0)
+ 		ret = t_ret;
+@@ -1090,5 +1102,102 @@
+ 	/* Make sure we don't return any garbage. */
+ 	*cntp = 0;
+ 	*namesp = NULL;
+ 	return (ret);
+ }
++
++/*
++ * __memp_mf_mark_dead --
++ *	Mark an MPOOLFILE as dead because its contents are no longer necessary.
++ *	This happens when removing, truncation, or closing an unnamed in-memory
++ *	database. Return, in the purgep parameter, whether the caller should
++ *	call __memp_purge_dead_files() after the lock on mfp is released. The
++ *	caller must hold an exclusive lock on the mfp handle.
++ *
++ * PUBLIC: void __memp_mf_mark_dead __P((DB_MPOOL *, MPOOLFILE *, int*));
++ */
++void
++__memp_mf_mark_dead(dbmp, mfp, purgep)
++	DB_MPOOL *dbmp;	
++	MPOOLFILE *mfp;
++	int *purgep;
++{
++	ENV *env;
++#ifdef HAVE_MUTEX_SUPPORT
++	REGINFO *infop;
++	DB_MUTEXREGION *mtxregion;
++	u_int32_t mutex_max, mutex_inuse, dead_mutex;
++#endif
++
++	if (purgep != NULL)
++		*purgep = 0;
++
++	env = dbmp->env;
++
++#ifdef HAVE_MUTEX_SUPPORT
++	if (MUTEX_ON(env) && mfp->deadfile == 0) {
++		infop = &env->mutex_handle->reginfo;
++		mtxregion = infop->primary;
++
++		mutex_inuse = mtxregion->stat.st_mutex_inuse;
++		if ((mutex_max = env->dbenv->mutex_cnt) == 0)
++			mutex_max = infop->rp->size / mtxregion->mutex_size;
++
++		/*
++		 * Purging dead pages requires a full scan of the entire cache
++		 * buffer, so it is a slow operation. We only want to do it
++		 * when it is necessary and provides enough benefits. Below is
++		 * a simple heuristic that determines when to purge all dead
++		 * pages.
++		 */
++		if (purgep != NULL && mutex_inuse > mutex_max - 200) {
++			/*
++			 * If the mutex region is almost full and there are
++			 * many mutexes held by dead files, purge dead files.
++			 */
++			(void)__memp_count_dead_mutex(dbmp, &dead_mutex);
++			dead_mutex += mfp->block_cnt + 1;
++
++			if (dead_mutex > mutex_inuse / 20)
++				*purgep = 1;
++		}
++	}
++#endif
++
++	mfp->deadfile = 1;
++}
++
++/*
++ * __memp_count_dead_mutex --
++ *	Estimate the number of mutexes held by dead files.
++ */
++static int
++__memp_count_dead_mutex(dbmp, dead_mutex)
++	DB_MPOOL *dbmp;
++	u_int32_t *dead_mutex;
++{
++	ENV *env;
++	DB_MPOOL_HASH *hp;
++	MPOOL *mp;
++	MPOOLFILE *mfp;
++	u_int32_t mutex_per_file;
++	int busy, i;
++
++	env = dbmp->env;
++	*dead_mutex = 0;
++	mutex_per_file = 1;
++
++	mp = dbmp->reginfo[0].primary;
++	hp = R_ADDR(dbmp->reginfo, mp->ftab);
++	for (i = 0; i < MPOOL_FILE_BUCKETS; i++, hp++) {
++		MUTEX_TRYLOCK(env, hp->mtx_hash, busy);
++		if (busy)
++			continue;
++		SH_TAILQ_FOREACH(mfp, &hp->hash_bucket, q, __mpoolfile) {
++			if (mfp->deadfile)
++				*dead_mutex += mfp->block_cnt + mutex_per_file;
++		}
++		MUTEX_UNLOCK(env, hp->mtx_hash);
++	}
++
++	return (0);
++}
+\ No newline at end of file
+diff -U 5 -rN db-4.7.25.old/mp/mp_method.c db-4.7.25/mp/mp_method.c
+--- db-4.7.25.old/mp/mp_method.c	2008-03-13 23:21:21.000000000 +0800
++++ db-4.7.25/mp/mp_method.c	2016-10-25 23:05:45.000000000 +0800
+@@ -476,11 +476,11 @@
+ 	DB_MPOOL_HASH *hp, *nhp;
+ 	MPOOL *mp;
+ 	MPOOLFILE *mfp;
+ 	roff_t newname_off;
+ 	u_int32_t bucket;
+-	int locked, ret;
++	int locked, purge_dead, ret;
+ 	size_t nlen;
+ 	void *p;
+ 
+ #undef	op_is_remove
+ #define	op_is_remove	(newname == NULL)
+@@ -493,10 +493,11 @@
+ 	dbmp = NULL;
+ 	mfp = NULL;
+ 	nhp = NULL;
+ 	p = NULL;
+ 	locked = ret = 0;
++	purge_dead = 0;
+ 
+ 	if (!MPOOL_ON(env))
+ 		goto fsop;
+ 
+ 	dbmp = env->mp_handle;
+@@ -585,11 +586,11 @@
+ 		 * they do not get reclaimed as long as they exist.  Since we
+ 		 * are now deleting the database, we need to dec that count.
+ 		 */
+ 		if (mfp->no_backing_file)
+ 			mfp->mpf_cnt--;
+-		mfp->deadfile = 1;
++		__memp_mf_mark_dead(dbmp, mfp, &purge_dead);
+ 		MUTEX_UNLOCK(env, mfp->mutex);
+ 	} else {
+ 		/*
+ 		 * Else, it's a rename.  We've allocated memory for the new
+ 		 * name.  Swap it with the old one.  If it's in memory we
+@@ -641,10 +642,16 @@
+ 	if (locked == 1) {
+ 		MUTEX_UNLOCK(env, hp->mtx_hash);
+ 		if (nhp != NULL && nhp != hp)
+ 			MUTEX_UNLOCK(env, nhp->mtx_hash);
+ 	}
++	/* 
++	 * __memp_purge_dead_files() must be called when the hash bucket is
++	 * unlocked.
++	 */
++	if (purge_dead)
++		(void)__memp_purge_dead_files(env);	
+ 	return (ret);
+ }
+ 
+ /*
+  * __memp_ftruncate __
+diff -U 5 -rN db-4.7.25.old/mp/mp_sync.c db-4.7.25/mp/mp_sync.c
+--- db-4.7.25.old/mp/mp_sync.c	2008-01-17 21:59:12.000000000 +0800
++++ db-4.7.25/mp/mp_sync.c	2016-10-27 00:21:06.000000000 +0800
+@@ -24,10 +24,11 @@
+ static int __bhcmp __P((const void *, const void *));
+ static int __memp_close_flush_files __P((ENV *, int));
+ static int __memp_sync_files __P((ENV *));
+ static int __memp_sync_file __P((ENV *,
+ 		MPOOLFILE *, void *, u_int32_t *, u_int32_t));
++static inline void __update_err_ret(int, int*);
+ 
+ /*
+  * __memp_walk_files --
+  * PUBLIC: int __memp_walk_files __P((ENV *, MPOOL *,
+  * PUBLIC:	int (*) __P((ENV *, MPOOLFILE *, void *,
+@@ -959,5 +960,115 @@
+ 		return (-1);
+ 	if (bhp1->track_pgno > bhp2->track_pgno)
+ 		return (1);
+ 	return (0);
+ }
++
++/*
++ * __memp_purge_dead_files --
++ *	Remove all dead files and their buffers from the mpool. The caller
++ *	cannot hold any lock on the dead MPOOLFILE handles, their buffers
++ *	or their hash buckets.
++ *
++ * PUBLIC: int __memp_purge_dead_files __P((ENV *));
++ */
++int
++__memp_purge_dead_files(env)
++	ENV *env;
++{
++	BH *bhp;
++	DB_MPOOL *dbmp;
++	DB_MPOOL_HASH *hp, *hp_end;
++	REGINFO *infop;
++	MPOOL *c_mp, *mp;
++	MPOOLFILE *mfp;
++	u_int32_t i_cache;
++	int ret, t_ret, h_lock;
++
++	if (!MPOOL_ON(env))
++		return (0);
++
++	dbmp = env->mp_handle;
++	mp = dbmp->reginfo[0].primary;
++	ret = t_ret = h_lock = 0;
++
++	/*
++	 * Walk each cache's list of buffers and free all buffers whose
++	 * MPOOLFILE is marked as dead.
++	 */
++	for (i_cache = 0; i_cache < mp->nreg; i_cache++) {
++		infop = &dbmp->reginfo[i_cache]; 
++		c_mp = infop->primary;
++
++		hp = R_ADDR(infop, c_mp->htab);
++		hp_end = &hp[c_mp->htab_buckets];
++		for (; hp < hp_end; hp++) {
++			/* Skip empty buckets. */
++			if (SH_TAILQ_FIRST(&hp->hash_bucket, __bh) == NULL)
++				continue;
++
++			/* 
++			 * Search for a dead buffer.
++			 */
++			MUTEX_TRYLOCK(env, hp->mtx_hash, t_ret);
++			if (t_ret != 0) {
++				__update_err_ret(t_ret, &ret);
++				continue;
++			}
++			h_lock = 1;
++			SH_TAILQ_FOREACH(bhp, &hp->hash_bucket, hq, __bh) {
++				/* Skip buffers that are being used. */
++				if (bhp->ref != 0)
++					continue;
++
++				mfp = R_ADDR(dbmp->reginfo, bhp->mf_offset);
++				if (!mfp->deadfile)
++					continue;
++
++				/* Found a dead buffer, prepare to free it. */
++				if (F_ISSET(bhp, BH_DIRTY)) {
++					DB_ASSERT(env,
++					    hp->hash_page_dirty != 0);
++					--hp->hash_page_dirty;
++					F_CLR(bhp, BH_DIRTY | BH_DIRTY_CREATE);
++				}
++
++				/*
++				 * Free the buffer. The buffer and hash bucket
++				 * are unlocked by __memp_bhfree.
++				 */
++				if ((t_ret = __memp_bhfree(dbmp, infop,
++				    hp, bhp, BH_FREE_FREEMEM)) == 0)
++					/*
++					 * Decrement hp, so the next turn will
++					 * search the same bucket again.
++					 */
++					hp--;
++				else if (ret == 0)
++					ret = t_ret;
++
++				/*
++				 * The hash bucket is unlocked, we need to
++				 * start over again.
++				 */
++				h_lock = 0;
++				break;
++			}
++
++			if (h_lock) {
++				MUTEX_UNLOCK(env, hp->mtx_hash);
++				h_lock = 0;
++			}
++		}
++	}
++
++	return (ret);
++}
++
++static inline void
++__update_err_ret(t_ret, retp)
++	int t_ret;
++	int *retp;
++{
++	if (t_ret != 0 && t_ret != DB_LOCK_NOTGRANTED && *retp == 0)
++		*retp = t_ret;
++}
+diff -U 5 -rN db-4.7.25.old/mp/mp_trickle.c db-4.7.25/mp/mp_trickle.c
+--- db-4.7.25.old/mp/mp_trickle.c	2008-01-09 04:58:42.000000000 +0800
++++ db-4.7.25/mp/mp_trickle.c	2016-10-25 23:15:16.000000000 +0800
+@@ -65,10 +65,14 @@
+ 	    "DB_ENV->memp_trickle: %d: percent must be between 1 and 100",
+ 		    pct);
+ 		return (EINVAL);
+ 	}
+ 
++	/* First we purge all dead files and their buffers. */
++	if ((ret = __memp_purge_dead_files(env)) != 0)
++		return (ret);
++
+ 	/*
+ 	 * Loop through the caches counting total/dirty buffers.
+ 	 *
+ 	 * XXX
+ 	 * Using hash_page_dirty is our only choice at the moment, but it's not
+diff -U 5 -rN db-4.7.25.old/mutex/mut_region.c db-4.7.25/mutex/mut_region.c
+--- db-4.7.25.old/mutex/mut_region.c	2008-01-09 04:58:43.000000000 +0800
++++ db-4.7.25/mutex/mut_region.c	2016-10-25 23:16:22.000000000 +0800
+@@ -312,11 +312,13 @@
+ 
+ 	s = sizeof(DB_MUTEXMGR) + 1024;
+ 
+ 	/* We discard one mutex for the OOB slot. */
+ 	s += __env_alloc_size(
+-	    (dbenv->mutex_cnt + 1) *__mutex_align_size(env));
++	    (dbenv->mutex_cnt + (dbenv->mutex_cnt == UINT32_MAX ? 0 : 1)) *
++	    __mutex_align_size(env));
++
+ 
+ 	return (s);
+ }
+ 
+ #ifdef	HAVE_MUTEX_SYSTEM_RESOURCES
+diff -U 5 -rN db-4.7.25.old/mutex/mut_tas.c db-4.7.25/mutex/mut_tas.c
+--- db-4.7.25.old/mutex/mut_tas.c	2008-03-13 23:23:09.000000000 +0800
++++ db-4.7.25/mutex/mut_tas.c	2016-10-26 23:54:14.000000000 +0800
+@@ -14,10 +14,13 @@
+  * This is where we load in architecture/compiler specific mutex code.
+  */
+ #define	LOAD_ACTUAL_MUTEX_CODE
+ #include "dbinc/mutex_int.h"
+ 
++static inline int __db_tas_mutex_lock_int
++	    __P((ENV *, db_mutex_t, int));
++
+ /*
+  * __db_tas_mutex_init --
+  *	Initialize a test-and-set mutex.
+  *
+  * PUBLIC: int __db_tas_mutex_init __P((ENV *, db_mutex_t, u_int32_t));
+@@ -69,10 +72,36 @@
+ int
+ __db_tas_mutex_lock(env, mutex)
+ 	ENV *env;
+ 	db_mutex_t mutex;
+ {
++	return (__db_tas_mutex_lock_int(env, mutex, 0));
++}
++
++/*
++ * __db_tas_mutex_trylock
++ *	Try to exclusively lock a mutex without ever blocking - ever!
++ *
++ *	Returns 0 on success,
++ *		DB_LOCK_NOTGRANTED if it is busy.
++ *
++ * PUBLIC: int __db_tas_mutex_trylock __P((ENV *, db_mutex_t));
++ */
++int
++__db_tas_mutex_trylock(env, mutex)
++	ENV *env;
++	db_mutex_t mutex;
++{
++	return (__db_tas_mutex_lock_int(env, mutex, 1));
++}
++
++static inline int
++__db_tas_mutex_lock_int(env, mutex, nowait)
++	ENV *env;
++	db_mutex_t mutex;
++	int nowait;
++{
+ 	DB_ENV *dbenv;
+ 	DB_MUTEX *mutexp;
+ 	DB_MUTEXMGR *mtxmgr;
+ 	DB_MUTEXREGION *mtxregion;
+ 	u_int32_t nspins;
+@@ -122,10 +151,12 @@
+ 		 * Avoid interlocked instructions until they're likely to
+ 		 * succeed.
+ 		 */
+ 		if (F_ISSET(mutexp, DB_MUTEX_LOCKED) ||
+ 		    !MUTEX_SET(&mutexp->tas)) {
++			if (nowait)
++				return (DB_LOCK_NOTGRANTED);
+ 			/*
+ 			 * Some systems (notably those with newer Intel CPUs)
+ 			 * need a small pause here. [#6975]
+ 			 */
+ #ifdef MUTEX_PAUSE
+diff -U 5 -rN db-4.7.25.old/test/memp009.tcl db-4.7.25/test/memp009.tcl
+--- db-4.7.25.old/test/memp009.tcl	1970-01-01 08:00:00.000000000 +0800
++++ db-4.7.25/test/memp009.tcl	2016-10-27 00:19:25.000000000 +0800
+@@ -0,0 +1,118 @@
++# See the file LICENSE for redistribution information.
++#
++# Copyright (c) 2016 Oracle and/or its affiliates.  All rights reserved.
++#
++# $Id: memp009.tcl,v 8a596ae5248f 2016/10/25 06:53:59 yong $
++#
++
++# TEST	memp009
++# TEST	Dead files and their buffers are removed when the mutex usage is high.
++proc memp009 { } {
++	source ./include.tcl
++
++	memp009_body "file-based"
++
++	memp009_body "in-mem named"
++
++	memp009_body "in-mem unnamed"
++}
++
++proc memp009_body { flags } {
++	source ./include.tcl
++
++	# Setting a small database page size helps drive up the mutex usage
++	set db_pagesize 1024
++	set mutex_max 400
++	set open_dbs {}
++
++	puts "Memp009: $flags dead file tests."
++
++	env_cleanup $testdir
++
++	puts "\tMemp009.a: Create the environment"
++
++	set dbenv [eval {berkdb_env -create -lock -mode 0644 -home $testdir \
++	    -mutex_set_max $mutex_max}]
++	error_check_good env_open [is_valid_env $dbenv] TRUE
++
++	puts "\tMemp009.b: Create databases"
++
++	set i 0
++	set mutex_inuse [mutex_count $dbenv "Mutexes in use"]
++	while {$mutex_inuse <= $mutex_max - 200 ||
++	    [mpoolfile_count] + $i <= $mutex_inuse / 20 } {
++		incr i
++
++		set db [ berkdb_open -env $dbenv -create -mode 0644 \
++		    -pagesize $db_pagesize -btree [get_dbname $flags $i] ]
++		error_check_good db:open:$i [is_valid_db $db] TRUE
++
++		if {$flags == "in-mem unnamed"} {
++			lappend open_dbs $db
++		} else {
++			error_check_good db:close:$i [$db close] 0
++		}
++		set mutex_inuse [mutex_count $dbenv "Mutexes in use"]
++	}
++	puts "\t\tMemp009: $i databases created."
++
++	if { $flags != "in-mem unnamed" } {
++		puts "\tMemp009.c: Reopen the environment with a new handle"
++
++		error_check_good env_close [$dbenv close] 0
++		set dbenv [eval {berkdb_env -lock -home $testdir \
++		    -mutex_set_max $mutex_max}]
++		error_check_good env_open2 [is_valid_env $dbenv] TRUE
++	}
++
++	puts "\tMemp009.d: Make databases dead"
++
++	set old_mpf_count [mpoolfile_count]
++	puts "\t\tMemp009: $old_mpf_count open mpoolfile handles."
++
++	for { set j 1 } { $j <= $i } { incr j } {
++		if {$flags == "in-mem unnamed"} {
++			error_check_good db:dead:close:$j \
++			    [ [lindex $open_dbs [expr $j - 1] ] close] 0
++		} else {
++			error_check_good db:dead:remove:$j [berkdb dbremove \
++			    -env $dbenv [get_dbname $flags $j] ] 0
++		}
++	}
++	set new_mpf_count [mpoolfile_count]
++	puts -nonewline "\t\tMemp009: $new_mpf_count open mpoolfile handles"
++	puts " after making some databases dead."
++
++	error_check_good "The number of open mpoolfile handles does not drop" \
++	    [expr $new_mpf_count < $old_mpf_count] 1
++
++	error_check_good env_close2 [$dbenv close] 0
++}
++
++proc get_dbname { flags i } {
++	if {$flags == "file-based"} {
++		return [list "db$i.db"]
++	} elseif {$flags == "in-mem named"} {
++		return [list "" "db$i.sub"]
++	} elseif {$flags == "in-mem unnamed"} {
++		return
++	}
++}
++
++proc mutex_count { env type } {
++	set stat [$env mutex_stat]
++	foreach pair $stat {
++		if { [lindex $pair 0] == $type } {
++			return [lindex $pair 1]
++		}
++	}
++	return 0
++}
++
++proc mpoolfile_count {} {
++	source ./include.tcl
++	global util_path
++	set pattern {\d+\tmpoolfile handle}
++	regexp $pattern [exec $util_path/db_stat -h $testdir -x] stat
++	return [lindex [split $stat "\t"] 0]
++}
+diff -U 5 -rN db-4.7.25.old/test/testparams.tcl db-4.7.25/test/testparams.tcl
+--- db-4.7.25.old/test/testparams.tcl	2008-02-06 23:13:44.000000000 +0800
++++ db-4.7.25/test/testparams.tcl	2016-10-27 00:19:02.000000000 +0800
+@@ -31,11 +31,11 @@
+ set test_names(inmemdb)	[list fop007 fop008 rep056 rep057 sdb013 sdb014 \
+     sdb015 sdb016 sdb017 sdb018 sdb019 sdb020]
+ set test_names(lock)    [list lock001 lock002 lock003 lock004 lock005 lock006]
+ set test_names(log)     [list log001 log002 log003 log004 log005 log006 \
+     log007 log008 log009]
+-set test_names(memp)	[list memp001 memp002 memp003 memp004]
++set test_names(memp)	[list memp001 memp002 memp003 memp004 memp009]
+ set test_names(plat)	[list plat001]
+ set test_names(recd)	[list recd001 recd002 recd003 recd004 recd005 recd006 \
+     recd007 recd008 recd009 recd010 recd011 recd012 recd013 recd014 recd015 \
+     recd016 recd017 recd018 recd019 recd020 recd022 recd023]
+ set test_names(rep)	[list rep001 rep002 rep003 rep005 rep006 rep007 \
+
